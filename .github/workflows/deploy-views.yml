@@ -1,0 +1,72 @@
+name: Execute SQL on BigQuery on file change
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'views/ddls/**/*.sql'
+
+jobs:
+  run-bigquery-query:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write' # REQUIRED for Workload Identity Federation
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.PROJECT_ID }}
+          version: latest
+          skip_install: false
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIP_ID }}
+          service_account: ${{ vars.SERVICE_ACCT }}
+
+      - name: Get modified SQL files
+        id: changed-files
+        uses: tj-actions/changed-files@v40
+        with:
+          files: 'views/ddls/**/*.sql'
+
+      - name: Execute SQL queries in BigQuery
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          CHANGED_FILES=""
+          if [ -n "${{ steps.changed-files.outputs.added_files }}" ]; then
+            CHANGED_FILES="${CHANGED_FILES} ${{ steps.changed-files.outputs.added_files }}"
+          fi
+          if [ -n "${{ steps.changed-files.outputs.modified_files }}" ]; then
+            CHANGED_FILES="${CHANGED_FILES} ${{ steps.changed-files.outputs.modified_files }}"
+          fi
+          if [ -n "${{ steps.changed-files.outputs.renamed_files }}" ]; then
+            CHANGED_FILES="${CHANGED_FILES} ${{ steps.changed-files.outputs.renamed_files }}"
+          fi
+
+          CHANGED_FILES=$(echo $CHANGED_FILES | xargs)
+
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "Processing the following changed SQL files:"
+            echo "$CHANGED_FILES"
+            for file in $CHANGED_FILES; do
+              echo "Executing query from: $file in BigQuery..."
+              bq query --batch --project_id=${{ vars.PROJECT_ID }} --nouse_legacy_sql < "$file"
+              if [ $? -ne 0 ]; then
+                echo "Error executing query from $file. Check BigQuery logs."
+                exit 1
+              fi
+              echo "Query from $file executed successfully."
+            done
+          else
+            echo "No SQL files (added, modified, or renamed) found in 'views/ddls/' that were changed. Skipping query execution."
+          fi
